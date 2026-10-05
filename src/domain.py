@@ -1,11 +1,15 @@
 """领域基础类型与输入校验。"""
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class DomainError(Exception):
     status = 400
     code = "domain_error"
+
+    def __init__(self, message: str = "", details: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 class ValidationError(DomainError):
@@ -26,6 +30,11 @@ class Conflict(DomainError):
 class PermissionDenied(DomainError):
     status = 403
     code = "permission_denied"
+
+
+class WriteUnavailable(DomainError):
+    status = 503
+    code = "write_busy"
 
 
 @dataclass(frozen=True)

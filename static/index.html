@@ -5,29 +5,350 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>跨海光缆故障与抢修协调</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
-    button { padding: .55rem .9rem; cursor: pointer; }
-    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 1.5rem; color: #17212b; background: #f7f9fb; }
+    main { max-width: 1180px; margin: auto; }
+    h1 { font-size: 1.3rem; }
+    .panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem 1.2rem; margin-bottom: 1rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    label { font-size: .8rem; color: #475569; display: block; margin: .4rem 0 .15rem; }
+    input, select { width: 100%; padding: .45rem .55rem; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; font-size: .85rem; }
+    .formrow { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+    button { padding: .5rem .9rem; cursor: pointer; border-radius: 6px; border: 1px solid #2563eb; background: #2563eb; color: #fff; font-size: .85rem; }
+    button.secondary { background: #fff; color: #2563eb; }
+    button.danger { background: #fff; border-color: #dc2626; color: #dc2626; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .toolbar { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .6rem 0; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid #eef2f7; vertical-align: top; }
+    th { color: #64748b; font-weight: 600; }
+    .tag { display: inline-block; padding: .08rem .45rem; border-radius: 999px; font-size: .72rem; background: #e2e8f0; }
+    .tag.held { background: #dcfce7; color: #166534; }
+    .tag.released { background: #f1f5f9; color: #475569; }
+    .alert { border-radius: 8px; padding: .6rem .8rem; font-size: .84rem; margin: .5rem 0; white-space: pre-wrap; }
+    .alert.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert.ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .muted { color: #94a3b8; font-size: .78rem; }
+    dialog { border: none; border-radius: 10px; width: min(480px, 92vw); padding: 1.2rem; }
+    dialog::backdrop { background: rgba(15,23,42,.45); }
+    h3 { margin: .2rem 0 .6rem; font-size: .95rem; }
   </style>
 </head>
 <body>
 <main>
-  <h1>跨海光缆故障与抢修协调</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <h1>跨海光缆故障与抢修协调 · 资源调度台</h1>
+
+  <div class="grid">
+    <section class="panel">
+      <h3>新建故障申报</h3>
+      <form id="createForm">
+        <div class="formrow">
+          <div><label>抢修引用号</label><input name="reference" required placeholder="CABLE-30001"></div>
+          <div><label>光缆 / 区段</label><div class="formrow"><input name="cable" value="SEA-1"><input name="segment" value="S3"></div></div>
+        </div>
+        <div class="formrow">
+          <div><label>起始里程 km</label><input name="start_km" type="number" step="0.1" value="120"></div>
+          <div><label>结束里程 km</label><input name="end_km" type="number" step="0.1" value="135"></div>
+        </div>
+        <div class="formrow">
+          <div><label>水深 m</label><input name="depth_m" type="number" value="1800"></div>
+          <div><label>海况 0-9</label><input name="sea_state" type="number" min="0" max="9" value="3"></div>
+        </div>
+        <div class="formrow">
+          <div><label>申报备缆长度 km</label><input name="spare_length_km" type="number" step="0.1" value="20"></div>
+          <div><label>容量 Gbps</label><input name="capacity_gbps" type="number" value="400"></div>
+        </div>
+        <div class="formrow">
+          <div><label>许可有效期至（可空）</label><input name="permit_expires_at" placeholder="2027-01-01T00:00:00Z"></div>
+          <div>
+            <label>条件确认</label>
+            <div style="display:flex;gap:1rem;font-size:.82rem;padding-top:.5rem">
+              <label style="margin:0"><input type="checkbox" name="vessel_available" checked style="width:auto"> 有船</label>
+              <label style="margin:0"><input type="checkbox" name="permit_valid" checked style="width:auto"> 许可有效</label>
+            </div>
+          </div>
+        </div>
+        <div class="toolbar"><button type="submit">提交申报</button><span class="muted">输入自动保留在本机，刷新不丢失</span></div>
+      </form>
+      <div id="createMsg"></div>
+    </section>
+
+    <section class="panel">
+      <h3>审批 / 改派（占用船与备缆）</h3>
+      <form id="approveForm">
+        <input type="hidden" name="record_id">
+        <div class="formrow">
+          <div><label>目标抢修记录</label><input name="record_ref" readonly></div>
+          <div><label>版本 expected_version</label><input name="expected_version" readonly></div>
+        </div>
+        <div class="formrow">
+          <div><label>抢修经理</label><input name="repair_manager" value="RM-2"></div>
+          <div><label>抢修船</label><input name="vessel_name" required value="CS-1"></div>
+        </div>
+        <div class="formrow">
+          <div><label>航行开始</label><input name="voyage_start" placeholder="2026-10-10T00:00:00Z"></div>
+          <div><label>航行结束</label><input name="voyage_end" placeholder="2026-10-12T00:00:00Z"></div>
+        </div>
+        <div class="formrow">
+          <div><label>在船备缆 km</label><input name="vessel_spare_km" type="number" step="0.1" value="40"></div>
+          <div><label>许可有效期至（可空）</label><input name="permit_expires_at" placeholder="2027-01-01T00:00:00Z"></div>
+        </div>
+        <div class="toolbar">
+          <button type="submit" id="approveBtn">审批占用</button>
+          <button type="button" class="secondary" id="reassignBtn">改派（释放原占用）</button>
+          <button type="button" class="secondary" id="clearBtn">清空选择</button>
+        </div>
+      </form>
+      <div id="approveMsg"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="toolbar">
+      <button id="refresh" class="secondary">刷新记录</button>
+      <select id="stateFilter" style="width:auto">
+        <option value="">全部状态</option>
+        <option>detected</option><option>approved</option><option>mobilized</option>
+        <option>surveyed</option><option>spliced</option><option>tested</option>
+        <option>restored</option><option>cancelled</option>
+      </select>
+      <span id="stats" class="muted"></span>
+    </div>
+    <table>
+      <thead><tr><th>ID</th><th>引用</th><th>状态/版本</th><th>占用资源</th><th>操作</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">点击“刷新记录”加载。</td></tr></tbody>
+    </table>
+  </section>
 </main>
+
+<dialog id="actionDialog">
+  <form id="actionForm" method="dialog">
+    <h3 id="dlgTitle">执行动作</h3>
+    <div id="dlgFields"></div>
+    <div class="toolbar" style="margin-top:.8rem">
+      <button type="submit" id="dlgSubmit">提交</button>
+      <button type="button" class="secondary" id="dlgCancel">取消</button>
+    </div>
+    <div id="dlgMsg"></div>
+  </form>
+</dialog>
+
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+const api = (path, options={}) => fetch(path, Object.assign({
+  headers: Object.assign({"Content-Type":"application/json"}, currentHeaders()),
+}, options));
+function currentHeaders() {
+  return {"X-User-Id": document.getElementById("userId")?.value || "dispatcher",
+          "X-Role": document.getElementById("userRole")?.value || "repair_manager"};
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+function show(el, kind, text, details) {
+  el.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'alert ' + kind;
+  div.textContent = text + (details ? '\n' + JSON.stringify(details, null, 2) : '');
+  el.appendChild(div);
+}
+function esc(s){ return String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// 表单输入持久化：冲突后后到者的输入不丢失
+function persistForm(form, key) {
+  const data = JSON.parse(localStorage.getItem(key) || '{}');
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    if (el.type === 'checkbox') { if (el.name in data) el.checked = data[el.name]; }
+    else if (el.name in data) el.value = data[el.name];
+    el.addEventListener('change', save);
+    el.addEventListener('input', save);
+  }
+  function save() {
+    const out = {};
+    for (const el of form.elements) {
+      if (!el.name) continue;
+      out[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+    }
+    localStorage.setItem(key, JSON.stringify(out));
+  }
+}
+
+// 身份切换条（演示两个调度员）
+const bar = document.createElement('div');
+bar.className = 'toolbar';
+bar.innerHTML = '<label style="margin:0">当前调度员 <input id="userId" value="dispatcher-1" style="width:140px;display:inline-block;margin-left:.3rem"></label>' +
+  '<label style="margin:0">角色 <select id="userRole" style="width:170px;display:inline-block;margin-left:.3rem"><option>repair_manager</option><option>vessel_master</option><option>cable_engineer</option><option>noc_operator</option><option>admin</option></select></label>';
+document.querySelector('h1').after(bar);
+bar.querySelectorAll('input,select').forEach(e => e.style.fontSize='.8rem');
+
+// ---- 创建 ----
+const createForm = document.getElementById('createForm');
+persistForm(createForm, 'form.create');
+createForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(createForm);
+  const reference = fd.get('reference');
+  const num = name => fd.get(name) === '' ? null : Number(fd.get(name));
+  const payload = {reference, data: {
+    cable: fd.get('cable'), segment: fd.get('segment'),
+    start_km: num('start_km'), end_km: num('end_km'), depth_m: num('depth_m'),
+    sea_state: num('sea_state'), spare_length_km: num('spare_length_km'),
+    capacity_gbps: num('capacity_gbps'),
+    permit_expires_at: fd.get('permit_expires_at') || undefined,
+    vessel_available: fd.get('vessel_available') === 'on',
+    permit_valid: fd.get('permit_valid') === 'on',
+  }};
+  const resp = await api('/api/records', {method:'POST', body: JSON.stringify(payload)});
+  const body = await resp.json();
+  const msg = document.getElementById('createMsg');
+  if (resp.ok) { show(msg, 'ok', '已创建 ' + body.reference + '（' + body.state + '）'); loadRecords(); }
+  else show(msg, 'error', body.message, body.details);
+});
+
+// ---- 审批 / 改派 ----
+const approveForm = document.getElementById('approveForm');
+persistForm(approveForm, 'form.approve');
+function fillApprove(record) {
+  approveForm.elements.record_id.value = record.id;
+  approveForm.elements.record_ref.value = record.reference + ' / ' + record.state;
+  approveForm.elements.expected_version.value = record.version;
+  if (record.payload && record.payload.vessel_name) approveForm.elements.vessel_name.value = record.payload.vessel_name;
+  if (record.payload && record.payload.permit_expires_at) approveForm.elements.permit_expires_at.value = record.payload.permit_expires_at;
+}
+async function submitApproval(action) {
+  const f = approveForm.elements;
+  const id = f.record_id.value, msg = document.getElementById('approveMsg');
+  if (!id) { show(msg, 'error', '请先从下方记录中点“审批/改派”选择一条记录'); return; }
+  const data = {repair_manager: f.repair_manager.value, vessel_name: f.vessel_name.value};
+  if (f.voyage_start.value) data.voyage_start = f.voyage_start.value;
+  if (f.voyage_end.value) data.voyage_end = f.voyage_end.value;
+  if (f.vessel_spare_km.value !== '') data.vessel_spare_km = Number(f.vessel_spare_km.value);
+  if (f.permit_expires_at.value) data.permit_expires_at = f.permit_expires_at.value;
+  const body0 = {expected_version: Number(f.expected_version.value), data};
+  let retries = 0;
+  for (;;) {
+    const resp = await api('/api/records/' + id + '/actions/' + action, {method:'POST', body: JSON.stringify(body0)});
+    const body = await resp.json();
+    if (resp.ok) {
+      show(msg, 'ok', (action === 'reassign' ? '改派成功，原占用已释放：' : '审批通过，已占用：') + body.payload.vessel_name);
+      fillApprove(body);
+      loadRecords();
+      return;
+    }
+    // 版本被别人抢先时自动刷新版本号并保留输入，让调度员一键重试
+    if (body.error === 'conflict' && body.message.includes('版本') && retries < 1) {
+      retries++;
+      const latest = await (await api('/api/records/' + id)).json();
+      f.expected_version.value = latest.version;
+      continue;
+    }
+    const hint = body.details && body.details.held_by
+      ? '\n被抢修记录 #' + body.details.held_by.record_id + '（' + body.details.held_by.reference + '）占住 —— 输入已保留，可换船或改派后重试。' : '';
+    show(msg, 'error', body.message + hint, body.details);
+    return;
+  }
+}
+approveForm.addEventListener('submit', ev => { ev.preventDefault(); submitApproval('approve'); });
+document.getElementById('reassignBtn').addEventListener('click', () => submitApproval('reassign'));
+document.getElementById('clearBtn').addEventListener('click', () => {
+  approveForm.elements.record_id.value = ''; approveForm.elements.record_ref.value = '';
+  approveForm.elements.expected_version.value = '';
+});
+
+// ---- 记录列表 ----
+const ACTION_FIELDS = {
+  approve: [['repair_manager','抢修经理','text']],
+  mobilize: [['weather_window_hours','海况窗口小时','number'],['available_spare_km','在船备缆km','number'],['vessel_name','船名','text']],
+  survey: [['survey_complete','勘察完成','checkbox'],['fault_location_km','故障点km','number']],
+  splice: [['splice_loss_db','接续损耗dB','number'],['spare_used_km','实耗备缆km','number']],
+  test: [['end_to_end_loss_db','端到端损耗dB','number']],
+  restore: [['traffic_restored','流量已恢复','checkbox'],['restore_capacity_gbps','恢复容量Gbps','number']],
+  cancel: [['cancel_reason','取消原因','text']],
+  reassign: [['vessel_name','改派船名','text']],
+};
+function resourceCell(r) {
+  const a = r.resource;
+  if (!a) return '<span class="muted">未占用</span>';
+  const win = a.voyage_start ? '<div class="muted">' + esc(a.voyage_start) + ' → ' + esc(a.voyage_end) + '</div>' : '';
+  const spare = '预留 ' + a.reserved_km + ' / 实耗 ' + a.used_km + ' / 归还 ' + a.returned_km + ' km';
+  return esc(a.vessel) + ' <span class="tag ' + (a.status === 'held' ? 'held' : 'released') + '">' + a.status + '</span>'
+    + '<div class="muted">' + spare + '</div>' + win;
+}
+function actionButtons(r) {
+  const map = {detected:['approve'], approved:['mobilize','reassign','cancel'], mobilized:['survey','reassign','cancel'],
+    surveyed:['splice'], spliced:['test'], tested:['restore']};
+  return (map[r.state]||[]).map(a => '<button class="secondary" data-id="'+r.id+'" data-action="'+a+'" data-ref="'+esc(r.reference)+'" data-version="'+r.version+'">'+a+'</button>').join(' ');
+}
+async function loadRecords() {
+  const state = document.getElementById('stateFilter').value;
+  const [resp, statsResp] = await Promise.all([
+    api('/api/records?limit=50' + (state ? '&state=' + state : '')),
+    api('/api/stats')]);
+  const body = await resp.json();
+  const stats = await statsResp.json();
+  document.getElementById('stats').textContent = Object.entries(stats).map(([k,v]) => k+':'+v).join('  ');
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = '';
+  if (!body.items.length) { tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无记录</td></tr>'; return; }
+  for (const r of body.items) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>'+r.id+'</td><td>'+esc(r.reference)+'</td><td>'+esc(r.state)+' <span class="muted">v'+r.version+'</span></td>'
+      + '<td>'+resourceCell(r)+'</td>'
+      + '<td><button class="secondary" data-pick="'+r.id+'">审批/改派</button> '+actionButtons(r)+'</td>';
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', async () => {
+    const r = await (await api('/api/records/' + b.dataset.pick)).json();
+    fillApprove(r);
+    window.scrollTo({top:0, behavior:'smooth'});
+  }));
+  tbody.querySelectorAll('[data-action]').forEach(b => b.addEventListener('click', () => openAction(b.dataset, b)));
+}
+document.getElementById('refresh').addEventListener('click', loadRecords);
+document.getElementById('stateFilter').addEventListener('change', loadRecords);
+
+// ---- 通用动作弹窗（mobilize/survey/.../cancel），输入在冲突时保留 ----
+const dlg = document.getElementById('actionDialog');
+const dlgFields = document.getElementById('dlgFields');
+let dlgContext = null;
+function openAction(meta, btn) {
+  const fields = ACTION_FIELDS[meta.action] || [];
+  document.getElementById('dlgTitle').textContent = meta.action + ' · ' + meta.ref;
+  dlgFields.innerHTML = fields.map(([name,label,type]) =>
+    type === 'checkbox'
+      ? '<label style="margin:.4rem 0"><input type="checkbox" name="'+name+'" style="width:auto"> '+label+'</label>'
+      : '<label>'+label+'</label><input name="'+name+'" type="'+(type==='number'?'number':'text')+'">').join('');
+  const saved = JSON.parse(localStorage.getItem('action.'+meta.action) || '{}');
+  for (const el of dlgFields.elements || []) { if (el.name && el.name in saved) el.value = saved[el.name]; }
+  dlgFields.querySelectorAll('input').forEach(el => el.addEventListener('input', () => {
+    const out = {}; dlgFields.querySelectorAll('input').forEach(x => out[x.name] = x.type==='checkbox'?x.checked:x.value);
+    localStorage.setItem('action.'+meta.action, JSON.stringify(out));
+  }));
+  dlgContext = {id: meta.id, action: meta.action, version: Number(meta.version), ref: meta.ref, rowButton: btn};
+  document.getElementById('dlgMsg').innerHTML = '';
+  dlg.showModal();
+}
+document.getElementById('dlgCancel').addEventListener('click', () => dlg.close());
+document.getElementById('actionForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const data = {};
+  dlgFields.querySelectorAll('input').forEach(el => {
+    if (el.type === 'checkbox') { if (el.checked) data[el.name] = true; }
+    else if (el.value !== '') data[el.name] = el.type === 'number' ? Number(el.value) : el.value;
+  });
+  const msg = document.getElementById('dlgMsg');
+  const resp = await api('/api/records/'+dlgContext.id+'/actions/'+dlgContext.action,
+    {method:'POST', body: JSON.stringify({expected_version: dlgContext.version, data})});
+  const body = await resp.json();
+  if (resp.ok) {
+    show(msg, 'ok', dlgContext.action+' 完成：' + (body.state) + (body.resource ? '（占用状态：'+body.resource.status+'）' : ''));
+    if (dlgContext.rowButton) dlgContext.rowButton.closest('tr').querySelectorAll('button').forEach(b => b.disabled = true);
+    setTimeout(() => { dlg.close(); loadRecords(); }, 700);
+  } else {
+    const hint = body.details && body.details.held_by
+      ? '\n被抢修记录 ' + body.details.held_by.reference + ' 占住，输入已保留，可直接改派或换船重试。' : '';
+    show(msg, 'error', body.message + hint, body.details);
+  }
+});
+
+loadRecords();
 </script>
 </body>
 </html>
