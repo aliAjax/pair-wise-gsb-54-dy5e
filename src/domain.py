@@ -1,5 +1,6 @@
 """领域基础类型与输入校验。"""
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
 
@@ -21,6 +22,20 @@ class NotFound(DomainError):
 class Conflict(DomainError):
     status = 409
     code = "conflict"
+
+
+class ResourceConflict(Conflict):
+    """抢修船或备缆被其他抢修记录占用；details描述被哪项抢修占住。"""
+
+    code = "resource_conflict"
+
+    def __init__(self, message: str, details: Dict[str, Any] = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+class StaleVersion(Conflict):
+    code = "version_conflict"
 
 
 class PermissionDenied(DomainError):
@@ -95,3 +110,32 @@ def text_list(data: Dict[str, Any], key: str, minimum: int = 0) -> List[str]:
     if len(value) < minimum:
         raise ValidationError("%s至少需要%s项" % (key, minimum))
     return [item.strip() for item in value]
+
+
+def iso_dt(data: Dict[str, Any], key: str, required: bool = False):
+    """解析ISO8601日期时间，统一为UTC；日期(YYYY-MM-DD)按当天结束(UTC)处理。
+
+    返回带时区的datetime；字段缺省且required=False时返回None。
+    """
+    raw = data.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        if required:
+            raise ValidationError("%s不能为空" % key)
+        return None
+    if not isinstance(raw, str):
+        raise ValidationError("%s必须是ISO8601时间文本" % key)
+    text_value = raw.strip()
+    try:
+        if len(text_value) == 10:
+            parsed = datetime.combine(date.fromisoformat(text_value), datetime.max.time()).replace(tzinfo=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationError("%s必须是ISO8601时间文本" % key) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def dt_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()

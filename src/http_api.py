@@ -4,7 +4,7 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .domain import Actor, DomainError, PermissionDenied, ValidationError
 
@@ -12,6 +12,7 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+VESSEL_RE = re.compile(r"^/api/vessels/(.+)$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -57,7 +58,11 @@ def make_handler(service: Any, static_dir: Path):
 
         def _handle_error(self, exc: Exception) -> None:
             if isinstance(exc, DomainError):
-                self._send(exc.status, {"error": exc.code, "message": str(exc)})
+                payload: Dict[str, Any] = {"error": exc.code, "message": str(exc)}
+                details = getattr(exc, "details", None)
+                if details:
+                    payload["conflict"] = details
+                self._send(exc.status, payload)
             else:
                 self._send(500, {"error": "internal_error", "message": "服务内部错误"})
 
@@ -87,6 +92,9 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
+                if parsed.path == "/api/resources":
+                    self._send(200, service.resources_snapshot(self._actor()))
+                    return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -99,6 +107,9 @@ def make_handler(service: Any, static_dir: Path):
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
                     return
+                if parsed.path == "/api/vessels":
+                    self._send(200, service.register_vessel(self._actor(), body))
+                    return
                 match = ACTION_RE.match(parsed.path)
                 if match:
                     version = body.get("expected_version")
@@ -106,6 +117,22 @@ def make_handler(service: Any, static_dir: Path):
                         raise ValidationError("expected_version必须是整数")
                     record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
                     self._send(200, record)
+                    return
+                self._send(404, {"error": "not_found", "message": "路径不存在"})
+            except Exception as exc:
+                self._handle_error(exc)
+
+        def do_PUT(self) -> None:
+            try:
+                parsed = urlparse(self.path)
+                body = self._body()
+                if parsed.path == "/api/spare-stock":
+                    self._send(200, service.set_spare_total(self._actor(), body.get("total_km")))
+                    return
+                match = VESSEL_RE.match(parsed.path)
+                if match:
+                    body["vessel_name"] = unquote(match.group(1))
+                    self._send(200, service.register_vessel(self._actor(), body))
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:

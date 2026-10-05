@@ -6,21 +6,48 @@
   <title>跨海光缆故障与抢修协调</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
+    main { max-width: 1040px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    fieldset { border: 1px solid #d3d9e0; border-radius: 8px; margin-top: 1rem; padding: 1rem; }
+    label { display: inline-flex; flex-direction: column; font-size: .85rem; gap: .25rem; margin: .35rem .6rem .35rem 0; }
+    input, select { padding: .4rem .5rem; border: 1px solid #b7c0ca; border-radius: 6px; }
+    .conflict { border-left: 4px solid #d4380d; background: #fff2e8; padding: .75rem 1rem; border-radius: 6px; white-space: pre-wrap; }
+    .ok { border-left: 4px solid #389e0d; background: #f6ffed; padding: .75rem 1rem; border-radius: 6px; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; margin-top: .5rem; }
+    th, td { border: 1px solid #d3d9e0; padding: .35rem .5rem; text-align: left; }
   </style>
 </head>
 <body>
 <main>
   <h1>跨海光缆故障与抢修协调</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <p>资源占用已接入审批：同一抢修船同期航行、备缆余量、许可有效期都会核对；冲突时记录停在原状态，下方表单保留输入并提示被哪项抢修占住。</p>
+  <div class="row"><button id="load">加载记录</button><button id="stats">状态统计</button><button id="resources">资源占用总览</button></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
+
+  <fieldset>
+    <legend>审批 / 改派（两名调度员并发提交同一艘船时，仅一人通过；后到者在此看到冲突，输入不清空）</legend>
+    <div class="row">
+      <label>记录ID <input id="f-id" type="number" style="width:7rem"></label>
+      <label>expected_version <input id="f-ver" type="number" value="1" style="width:6rem"></label>
+      <label>动作
+        <select id="f-action">
+          <option value="approve">approve 审批</option>
+          <option value="reassign">reassign 改派</option>
+        </select>
+      </label>
+      <label>抢修船 <input id="f-vessel" value="CS-1" style="width:7rem"></label>
+      <label>航行开始 <input id="f-from" type="datetime-local" value="2026-10-10T00:00"></label>
+      <label>航行结束 <input id="f-to" type="datetime-local" value="2026-10-12T00:00"></label>
+      <label>许可有效期至 <input id="f-permit" type="date" style="width:9rem"></label>
+      <label>&nbsp;<button id="f-submit">提交</button></label>
+    </div>
+    <div id="form-msg"></div>
+  </fieldset>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo","Content-Type":"application/json"};
 async function show(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
@@ -28,6 +55,52 @@ async function show(path) {
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("resources").onclick = () => show("/api/resources");
+
+function isoLocal(value) {
+  // datetime-local给出本地时间，追加Z由服务端按UTC解释（演示环境足够）
+  return value ? value.length === 16 ? value + ":00Z" : value : undefined;
+}
+document.getElementById("f-submit").onclick = async () => {
+  const msg = document.getElementById("form-msg");
+  msg.className = ""; msg.textContent = "";
+  const id = document.getElementById("f-id").value;
+  const body = {
+    expected_version: parseInt(document.getElementById("f-ver").value, 10),
+    data: {
+      vessel_name: document.getElementById("f-vessel").value,
+      sailing_from: isoLocal(document.getElementById("f-from").value),
+      sailing_to: isoLocal(document.getElementById("f-to").value)
+    }
+  };
+  const permit = document.getElementById("f-permit").value;
+  if (permit) body.data.permit_expiry = permit;
+  if (document.getElementById("f-action").value === "approve") body.data.repair_manager = "RM-WEB";
+  const response = await fetch(`/api/records/${id}/actions/${document.getElementById("f-action").value}`, {
+    method: "POST", headers, body: JSON.stringify(body)
+  });
+  const data = await response.json();
+  if (response.ok) {
+    msg.className = "ok";
+    msg.textContent = "已通过：" + JSON.stringify(data.state) + "，当前版本 " + data.version + "。占用：\n" +
+      (data.occupations || []).map(o => `${o.resource_type} ${o.resource_name || ""} ${o.status} ` +
+        (o.sailing_from ? `${o.sailing_from}~${o.sailing_to}` : "") +
+        (o.reserved_km != null ? `预留${o.reserved_km}km` : "") +
+        (o.used_km != null ? `实占${o.used_km}km` : "")).join("\n");
+    document.getElementById("f-ver").value = data.version;
+  } else {
+    // 冲突：保留全部输入，仅提示被哪项抢修占住
+    msg.className = "conflict";
+    let text = `【${data.error}】${data.message}`;
+    if (data.conflict && data.conflict.occupied_by) {
+      text += "\n占用方：\n" + data.conflict.occupied_by.map(o =>
+        `- 抢修单 ${o.reference}（记录#${o.record_id}）${o.resource_name ? "船" + o.resource_name : ""} ` +
+        `${o.sailing_from || ""}~${o.sailing_to || ""}`).join("\n");
+      text += "\n\n可改派他船/调整时间窗后直接重试，输入已保留。";
+    }
+    msg.textContent = text;
+  }
+};
 </script>
 </body>
 </html>

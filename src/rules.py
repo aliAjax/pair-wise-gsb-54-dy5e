@@ -1,13 +1,30 @@
 """跨海光缆故障与抢修协调领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+from .domain import (
+    Actor,
+    Conflict,
+    ValidationError,
+    boolean,
+    choice,
+    dt_text,
+    integer,
+    iso_dt,
+    number,
+    optional_text,
+    text,
+    text_list,
+)
 
 
 INITIAL_STATE = "detected"
+ACTIVE_STATES = {"detected", "approved", "mobilized", "surveyed", "spliced", "tested"}
 CREATE_ROLES = {'noc_operator'}
-ACTION_ROLES = {'approve': {'repair_manager'}, 'mobilize': {'vessel_master'}, 'survey': {'cable_engineer'}, 'splice': {'cable_engineer'}, 'test': {'noc_operator'}, 'restore': {'noc_operator', 'repair_manager'}, 'cancel': {'repair_manager'}}
+ACTION_ROLES = {'approve': {'repair_manager'}, 'mobilize': {'vessel_master'}, 'survey': {'cable_engineer'}, 'splice': {'cable_engineer'}, 'test': {'noc_operator'}, 'restore': {'noc_operator', 'repair_manager'}, 'cancel': {'repair_manager'}, 'reassign': {'repair_manager', 'vessel_master'}}
 TRANSITIONS = {'approve': {'detected': 'approved'}, 'mobilize': {'approved': 'mobilized'}, 'survey': {'mobilized': 'surveyed'}, 'splice': {'surveyed': 'spliced'}, 'test': {'spliced': 'tested'}, 'restore': {'tested': 'restored'}, 'cancel': {'detected': 'cancelled', 'approved': 'cancelled', 'mobilized': 'cancelled'}}
+# 改派不改变状态，仅替换占用的抢修船
+STATE_KEEPING_ACTIONS = {'reassign'}
 
 
 class DomainRules:
@@ -23,7 +40,7 @@ class DomainRules:
         return role == "admin" or role in CREATE_ROLES
 
     def role_can_action(self, role: str, action: str) -> bool:
-        return role == "admin" or role in ACTION_ROLES.get(action, set())
+        return role == "admin" or ACTION_ROLES.get(action, set())
 
     def validate_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         p = dict(payload)
@@ -37,6 +54,10 @@ class DomainRules:
         number(p, "spare_length_km", 0)
         boolean(p, "permit_valid")
         integer(p, "capacity_gbps", 1)
+        # 许可有效期为新增可选字段；旧数据没有时按仅permit_valid判断
+        permit_expiry = iso_dt(p, "permit_expiry")
+        if permit_expiry is not None:
+            p["permit_expiry"] = dt_text(permit_expiry)
         if end <= start:
             raise ValidationError("结束里程必须大于开始里程")
         return p
@@ -57,11 +78,34 @@ class DomainRules:
             if float(payload["start_km"]) < float(item["payload"].get("end_km", 0)) and float(payload["end_km"]) > float(item["payload"].get("start_km", 0)):
                 raise Conflict("同一光缆区段已有未结束抢修")
 
-    def require_transition(self, record: Dict[str, Any], action: str) -> str:
+    def require_transition(self, record: Dict[str, Any], action: str) -> Optional[str]:
+        if action in STATE_KEEPING_ACTIONS:
+            if record["state"] not in {"approved", "mobilized"}:
+                raise Conflict("当前状态不允许执行%s" % action)
+            return record["state"]
         allowed = TRANSITIONS.get(action, {}).get(record["state"])
         if allowed is None:
             raise Conflict("当前状态不允许执行%s" % action)
         return allowed
+
+    @staticmethod
+    def _sailing_window(data: Dict[str, Any], existing: Dict[str, Any] = None) -> Tuple[str, str]:
+        """从动作输入读取航行时间窗；缺省时用既有占用窗口，再缺省按当前时刻估算。"""
+        start = iso_dt(data, "sailing_from")
+        end = iso_dt(data, "sailing_to")
+        if existing and start is None and end is None:
+            old_start = existing.get("sailing_from")
+            old_end = existing.get("sailing_to")
+            if old_start and old_end:
+                return old_start, old_end
+        if start is None:
+            start = datetime.now(timezone.utc)
+        if end is None:
+            estimated = float(existing.get("estimated_repair_hours", 24.0)) if existing else 24.0
+            end = start + timedelta(hours=max(estimated, 1.0))
+        if end <= start:
+            raise ValidationError("航行结束时间必须晚于开始时间")
+        return dt_text(start), dt_text(end)
 
     def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str]:
         new_state = self.require_transition(record, action)
@@ -73,14 +117,22 @@ class DomainRules:
             if not bool(p["permit_valid"]) or not bool(p["vessel_available"]):
                 raise ValidationError("许可或船舶条件不满足")
             changes["repair_manager"] = text(data, "repair_manager")
+            vessel_name = optional_text(data, "vessel_name")
+            if vessel_name:
+                changes["vessel_name"] = vessel_name
+                # 许可有效期可在审批时补充或更正（日期按当天结束计）
+                permit_expiry = iso_dt(data, "permit_expiry")
+                if permit_expiry is not None:
+                    changes["permit_expiry"] = dt_text(permit_expiry)
+                changes["sailing_from"], changes["sailing_to"] = self._sailing_window(data, p)
             summary = "抢修方案已批准"
         elif action == "mobilize":
             if float(data.get("weather_window_hours", 0)) < float(p["estimated_repair_hours"]):
                 raise ValidationError("海况窗口不足以完成抢修")
-            if float(data.get("available_spare_km", 0)) < float(p["required_spare_km"]):
-                raise ValidationError("船上备缆不足")
             changes["weather_window_hours"] = float(data["weather_window_hours"])
-            changes["vessel_name"] = text(data, "vessel_name")
+            vessel_name = text(data, "vessel_name")
+            changes["vessel_name"] = vessel_name
+            changes["sailing_from"], changes["sailing_to"] = self._sailing_window(data, p)
             summary = "抢修船已动员"
         elif action == "survey":
             if not boolean(data, "survey_complete"):
@@ -94,10 +146,11 @@ class DomainRules:
             loss = number(data, "splice_loss_db", 0)
             if loss > 0.2:
                 raise ValidationError("接续损耗超过阈值")
-            if float(data.get("spare_used_km", 0)) < float(p["repair_distance_km"]):
+            spare_used = number(data, "spare_used_km", 0)
+            if spare_used < float(p["repair_distance_km"]):
                 raise ValidationError("备缆使用长度不足")
             changes["splice_loss_db"] = loss
-            changes["spare_used_km"] = float(data["spare_used_km"])
+            changes["spare_used_km"] = spare_used
             summary = "光缆接续完成"
         elif action == "test":
             end_loss = number(data, "end_to_end_loss_db", 0)
@@ -111,9 +164,23 @@ class DomainRules:
                 raise ValidationError("业务流量尚未恢复")
             changes["traffic_restored"] = True
             changes["restore_capacity_gbps"] = integer(data, "restore_capacity_gbps", 1)
+            returned = data.get("spare_returned_km", 0)
+            if isinstance(returned, bool) or not isinstance(returned, (int, float)) or float(returned) < 0:
+                raise ValidationError("spare_returned_km必须是非负数字")
+            changes["spare_returned_km"] = float(returned)
             summary = "通信恢复"
         elif action == "cancel":
             changes["cancel_reason"] = text(data, "cancel_reason")
             summary = "抢修取消"
+        elif action == "reassign":
+            changes["vessel_name"] = text(data, "vessel_name")
+            permit_expiry = iso_dt(data, "permit_expiry")
+            if permit_expiry is not None:
+                changes["permit_expiry"] = dt_text(permit_expiry)
+            changes["sailing_from"], changes["sailing_to"] = self._sailing_window(data, p)
+            reason = optional_text(data, "reason")
+            if reason:
+                changes["reassign_reason"] = reason
+            summary = "抢修船已改派"
         p.update(changes)
         return new_state, p, summary or ("已执行%s" % action)

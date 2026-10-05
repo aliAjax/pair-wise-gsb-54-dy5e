@@ -2,8 +2,9 @@
 from typing import Any, Dict, List, Optional
 
 from .audit import AuditRecorder
-from .domain import Actor, PermissionDenied, text
+from .domain import Actor, PermissionDenied, ResourceConflict, ValidationError, text
 from .repository import Repository
+from .resources import ResourceManager
 from .rules import DomainRules
 
 
@@ -12,6 +13,7 @@ class Service:
         self.repository = repository
         self.rules = rules
         self.audit = audit or AuditRecorder(repository)
+        self.resources = ResourceManager(repository)
 
     @staticmethod
     def _actor(actor: Actor) -> Actor:
@@ -41,7 +43,13 @@ class Service:
     def get_record(self, actor: Actor, record_id: int) -> Dict[str, Any]:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
-        return self.repository.get(record_id)
+        return self._with_occupations(self.repository.get(record_id))
+
+    def _with_occupations(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        record["occupations"] = [
+            item for item in self.repository.active_occupations() if int(item["record_id"]) == int(record["id"])
+        ]
+        return record
 
     def act(self, actor: Actor, record_id: int, expected_version: int, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         actor = self._actor(actor)
@@ -52,15 +60,38 @@ class Service:
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
         new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
-        return self.repository.mutate(
-            record_id=record_id,
-            expected_version=int(expected_version),
-            state=new_state,
-            payload=new_payload,
-            actor_id=actor.user_id,
-            action=action,
-            details={"summary": summary, "input": data or {}, "from": record["state"], "to": new_state},
-        )
+        resource_info: Dict[str, Any] = {}
+
+        def worker(connection) -> None:
+            # 在写事务内核对船的同期航行、备缆余量和许可有效期
+            resource_info.update(self.resources.apply(connection, record, action, new_payload))
+
+        details = {"summary": summary, "input": data or {}, "from": record["state"], "to": new_state}
+        try:
+            result = self.repository.commit_action(
+                record_id=record_id,
+                expected_version=int(expected_version),
+                state=new_state,
+                payload=new_payload,
+                actor_id=actor.user_id,
+                action=action,
+                details=details,
+                worker=worker,
+            )
+        except ResourceConflict as exc:
+            # 冲突：记录停在当前状态，写明被哪项抢修占住；输入不入库，由调用方保留后重试
+            self._note_blocked(record_id, actor, action, data or {}, exc)
+            raise
+        details["resources"] = resource_info
+        return self._with_occupations(result)
+
+    def _note_blocked(self, record_id: int, actor: Actor, action: str, data: Dict[str, Any], exc: ResourceConflict) -> None:
+        try:
+            self.audit.note(record_id, actor.user_id, "blocked",
+                           {"action": action, "reason": str(exc), "conflict": exc.details, "input": data})
+        except Exception:
+            # 审计记录失败不应掩盖原始冲突
+            pass
 
     def timeline(self, actor: Actor, record_id: int) -> List[Dict[str, Any]]:
         actor = self._actor(actor)
@@ -71,3 +102,35 @@ class Service:
         actor = self._actor(actor)
         self._ensure_known_role(actor)
         return self.repository.stats()
+
+    # ---- 资源台账 ----
+
+    def resources_snapshot(self, actor: Actor) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        return self.resources.snapshot()
+
+    def set_spare_total(self, actor: Actor, total_km) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if actor.role not in {"admin", "repair_manager"}:
+            raise PermissionDenied("角色无权调整备缆存量")
+        if total_km is not None:
+            from .domain import number
+            total_km = number({"total_km": total_km}, "total_km", 0)
+        value = self.repository.set_spare_total(total_km, actor.user_id)
+        return {"total_km": value}
+
+    def register_vessel(self, actor: Actor, data: Dict[str, Any]) -> Dict[str, Any]:
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        if actor.role not in {"admin", "repair_manager", "vessel_master"}:
+            raise PermissionDenied("角色无权登记船舶许可")
+        vessel_name = text(data, "vessel_name")
+        permit_no = data.get("permit_no", "")
+        if permit_no is not None and not isinstance(permit_no, str):
+            raise ValidationError("permit_no必须是文本")
+        from .domain import iso_dt, dt_text
+        expiry = iso_dt(data, "permit_expiry")
+        vessel = self.repository.upsert_vessel(vessel_name, (permit_no or "").strip(), dt_text(expiry) if expiry else None, actor.user_id)
+        return vessel
